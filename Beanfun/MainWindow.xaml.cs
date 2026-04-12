@@ -64,6 +64,7 @@ namespace Beanfun
         public AccountManager accountManager = null;
 
         public BeanfunClient bfClient;
+        private readonly object _bfClientLock = new object();
 
         public BeanfunClient.QRCodeClass qrcodeClass;
 
@@ -1897,7 +1898,10 @@ namespace Beanfun
                 || App.ReleaseResource("LRProc.exe") == -1
                 || App.ReleaseResource("LRSubMenus.dll") == -1
             )
+            {
                 MessageBox.Show(TryFindResource("MsgLocalePluginReleaseError") as string);
+                return;
+            }
 
             var commandLine = string.Empty;
             commandLine = path.StartsWith("\"") ? $"{path} " : $"\"{path}\" ";
@@ -1912,12 +1916,7 @@ namespace Beanfun
                     try
                     {
                         var proc = new Process();
-                        proc.StartInfo.FileName = Path.Combine(
-                            Path.GetDirectoryName(
-                                System.Diagnostics.Process.GetCurrentProcess().MainModule.FileName
-                            ),
-                            "LRProc.exe"
-                        );
+                        proc.StartInfo.FileName = Path.Combine(App.AppDir, "LRProc.exe");
                         proc.StartInfo.Arguments =
                             "ef3e7b42-a87c-4c07-ae3e-eeebeef12762 " + commandLine;
                         proc.StartInfo.WorkingDirectory = Path.GetDirectoryName(path);
@@ -2269,16 +2268,29 @@ namespace Beanfun
                     break;
                 }
 
-                if (this.getOtpWorker.IsBusy || this.loginWorker.IsBusy || this.totpWorker.IsBusy)
+                if (
+                    this.getOtpWorker.IsBusy
+                    || this.loginWorker.IsBusy
+                    || this.totpWorker.IsBusy
+                    || this.qrWorker.IsBusy
+                    || this.verifyWorker.IsBusy
+                )
                 {
                     Console.WriteLine("ping.busy sleep 1s");
                     System.Threading.Thread.Sleep(1000 * 1);
                     continue;
                 }
 
-                if (this.bfClient != null)
+                if (this.bfClient != null && Monitor.TryEnter(_bfClientLock))
                 {
-                    this.bfClient.Ping();
+                    try
+                    {
+                        this.bfClient.Ping();
+                    }
+                    finally
+                    {
+                        Monitor.Exit(_bfClientLock);
+                    }
                 }
 
                 for (int i = 0; i < WaitSecs; ++i)
@@ -2316,7 +2328,17 @@ namespace Beanfun
                 MessageBox.Show("QRCode not get yet");
                 return;
             }
-            int res = this.bfClient.QRCodeCheckLoginStatus(this.qrcodeClass);
+            if (!Monitor.TryEnter(_bfClientLock))
+                return;
+            int res;
+            try
+            {
+                res = this.bfClient.QRCodeCheckLoginStatus(this.qrcodeClass);
+            }
+            finally
+            {
+                Monitor.Exit(_bfClientLock);
+            }
             if (res != 0)
                 this.qrCheckLogin.IsEnabled = false;
             if (res == 1)
@@ -2360,7 +2382,17 @@ namespace Beanfun
 
         private void bfAPPAutoLogin_Tick(object sender, EventArgs e)
         {
-            JObject resultJson = this.bfClient.CheckIsRegisteDevice(service_code, service_region);
+            if (!Monitor.TryEnter(_bfClientLock))
+                return;
+            JObject resultJson;
+            try
+            {
+                resultJson = this.bfClient.CheckIsRegisteDevice(service_code, service_region);
+            }
+            finally
+            {
+                Monitor.Exit(_bfClientLock);
+            }
             if (resultJson == null || resultJson["IntResult"] == null)
                 return;
             if ((string)resultJson["IntResult"] != "1" && (string)resultJson["IntResult"] != "0")
