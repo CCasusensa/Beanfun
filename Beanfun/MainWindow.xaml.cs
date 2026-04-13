@@ -378,8 +378,9 @@ namespace Beanfun
                 );
                 if (loginMethod < (int)LoginMethod.Regular)
                     loginMethod = int.Parse(ConfigAppSettings.GetValue("loginMethod", "0"));
-                if (loginMethod > (int)LoginMethod.GamePass)
-                    loginMethod = (int)LoginMethod.GamePass;
+                // Don't restore QRCode/GamePass on startup — they require active auth sessions
+                if (loginMethod > (int)LoginMethod.Regular)
+                    loginMethod = (int)LoginMethod.Regular;
 
                 loginMethodInit();
 
@@ -1013,6 +1014,7 @@ namespace Beanfun
         public void loginMethodChanged()
         {
             qrCheckLogin.IsEnabled = false;
+            btn_Region.IsEnabled = true;
 
             if (App.LoginRegion == "TW")
             {
@@ -2082,11 +2084,6 @@ namespace Beanfun
         private void getOtpWorker_DoWork(object sender, DoWorkEventArgs e)
         {
             CancelWork();
-            //if (this.pingWorker.IsBusy) this.pingWorker.CancelAsync();
-            /*while (this.pingWorker.IsBusy) {
-                Thread.Sleep(133);
-            }
-            */
 
             Console.WriteLine("getOtpWorker start");
             Thread.CurrentThread.Name = "GetOTP Worker";
@@ -2097,11 +2094,19 @@ namespace Beanfun
                 return;
             }
             Console.WriteLine("call GetOTP");
-            this.otp = this.bfClient.GetOTP(
-                this.bfClient.accountList[index],
-                this.service_code,
-                this.service_region
-            );
+            Monitor.Enter(_bfClientLock);
+            try
+            {
+                this.otp = this.bfClient.GetOTP(
+                    this.bfClient.accountList[index],
+                    this.service_code,
+                    this.service_region
+                );
+            }
+            finally
+            {
+                Monitor.Exit(_bfClientLock);
+            }
             Console.WriteLine("call GetOTP done");
             if (this.otp == null)
                 e.Result = -1;
@@ -2110,8 +2115,6 @@ namespace Beanfun
                 e.Result = index;
             }
 
-            //if (!this.pingWorker.IsBusy) this.pingWorker.RunWorkerAsync();
-            //this.pingWorker.RunWorkerAsync();
             ResumeWork();
             return;
         }
