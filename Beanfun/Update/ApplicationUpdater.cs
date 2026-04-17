@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Net;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Windows;
 using Newtonsoft.Json;
 
@@ -18,41 +19,47 @@ namespace Beanfun.Update
             "https://ghfast.top/",
         };
 
-        private static string _cachedProxy;
+        private const int ProbeTimeoutMs = 5000;
 
-        private static string GetProxy()
+        private static readonly Lazy<string> _cachedProxy = new Lazy<string>(
+            DiscoverProxy,
+            LazyThreadSafetyMode.ExecutionAndPublication
+        );
+
+        private static bool TryProbe(string url)
         {
-            if (_cachedProxy != null)
-                return _cachedProxy;
-
-            // Test direct GitHub access first
             try
             {
-                var req = WebRequest.CreateHttp("https://api.github.com");
+                var req = WebRequest.CreateHttp(url);
                 req.Method = "HEAD";
-                req.Timeout = 5000;
-                req.UserAgent = "Beanfun";
+                req.Timeout = ProbeTimeoutMs;
+                req.UserAgent = $"Beanfun(V{App.AssemblyVersion})";
                 using (req.GetResponse()) { }
-                return _cachedProxy = "";
+                return true;
             }
-            catch { }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static string DiscoverProxy()
+        {
+            // Test direct GitHub access first
+            if (TryProbe("https://api.github.com"))
+                return "";
 
             // Direct access failed, try proxies
             foreach (var proxy in GH_PROXIES)
             {
-                try
-                {
-                    var req = WebRequest.CreateHttp(proxy + "https://api.github.com");
-                    req.Method = "HEAD";
-                    req.Timeout = 5000;
-                    req.UserAgent = "Beanfun";
-                    using (req.GetResponse()) { }
-                    return _cachedProxy = proxy;
-                }
-                catch { }
+                if (TryProbe(proxy + "https://api.github.com"))
+                    return proxy;
             }
-            return _cachedProxy = "";
+
+            return "";
         }
+
+        private static string GetProxy() => _cachedProxy.Value;
 
         public class GitHubRelease
         {
@@ -78,7 +85,33 @@ namespace Beanfun.Update
             public string BrowserDownloadUrl { get; set; }
         }
 
+        private static int _checkRunning;
+
         internal static void CheckApplicationUpdate(bool show)
+        {
+            // Prevent concurrent checks (e.g. startup probe + About-page click collision).
+            if (Interlocked.CompareExchange(ref _checkRunning, 1, 0) != 0)
+                return;
+
+            var thread = new Thread(() =>
+            {
+                try
+                {
+                    RunCheck(show);
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _checkRunning, 0);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "UpdateCheck",
+            };
+            thread.Start();
+        }
+
+        private static void RunCheck(bool show)
         {
             string proxy = GetProxy();
             var url = proxy + "https://api.github.com/repos/pungin/beanfun/releases";
@@ -97,7 +130,8 @@ namespace Beanfun.Update
                     if (release == null)
                         return;
 
-                    // 解析遠端 Tag (格式: vMajor.Minor.Patch.Timestamp)
+                    // 1. 解析遠端 Tag (格式: vMajor.Minor.Patch.Timestamp)
+                    // Groups: [1]=Major, [2]=Minor, [3]=Patch, [4]=Timestamp
                     var match = Regex.Match(release.TagName, @"^v(\d+)\.(\d+)\.(\d+)\.(\d+)$");
                     if (!match.Success)
                         return;
@@ -106,8 +140,11 @@ namespace Beanfun.Update
                     string minor = match.Groups[2].Value;
                     string patch = match.Groups[3].Value;
                     string timestamp = match.Groups[4].Value;
+
+                    // 2. 準備顯示文字: 5.8.3(2604011114)
                     string newVerDisplay = $"{major}.{minor}.{patch}({timestamp})";
 
+                    // 3. 數值比較邏輯 (傳入 patch 以支援 5.8.9 < 5.8.10)
                     if (IsNewerVersion(App.AssemblyVersion, major, minor, patch, timestamp))
                     {
                         string msg = string.Format(
@@ -178,6 +215,7 @@ namespace Beanfun.Update
 
         /// <summary>
         /// 比較版本號。將 Major, Minor, Patch 全部補齊 3 位後與 Timestamp 拼接進行 Long 比較。
+        /// 確保 5.8.9 < 5.8.10 且 Timestamp 格式永遠大於舊版。
         /// </summary>
         private static bool IsNewerVersion(
             string localVer,
@@ -189,13 +227,16 @@ namespace Beanfun.Update
         {
             try
             {
+                // 提取本地 Timestamp
                 var match = Regex.Match(localVer, @"(\d+)\.(\d+)\.?(\d+)?\.?\((\d+)\)");
 
                 if (match.Success)
                 {
                     string localTimestamp = match.Groups[4].Value;
                     if (timestamp == localTimestamp)
+                    {
                         return false;
+                    }
 
                     long remoteNum = long.Parse(
                         string.Format(
